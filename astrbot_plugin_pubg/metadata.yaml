@@ -1,6 +1,6 @@
 name: astrbot_plugin_pubg
 display_name: PUBG 战绩查询
 desc: PUBG 玩家终身战绩与最近对局查询插件
-version: v1.1.0
+version: v1.2.0
 author: RainySY
 repo: https://github.com/RainySY/astrbot_plugin_pubg

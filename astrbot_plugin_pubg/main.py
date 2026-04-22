@@ -90,7 +90,7 @@ def _render_image(
     gm_stats: dict,
     player_id: str,
     match_results: list,
-) -> bytes:
+) -> str:
     # ── 先计算内容高度 ────────────────────────────────────
     mode_rows = []
     for mode_key, mode_label in _MODE_LABELS.items():
@@ -158,7 +158,7 @@ def _render_image(
         longest  = s.get("longestKill", 0.0)
         survived = s.get("timeSurvived", 0.0)
 
-        kd       = kills / max(rounds - wins, 1)
+        kd       = kills / rounds if rounds else 0
         win_pct  = wins  / rounds * 100
         top10_pct= top10 / rounds * 100
         avg_dmg  = damage / rounds
@@ -262,7 +262,7 @@ class PubgPlugin(Star):
         if len(parts) < 2:
             yield event.plain_result(
                 "用法: /pubg <玩家名> [平台]\n"
-                "平台可选: steam(默认) | psn | xbox | kakao\n"
+                "平台可选: steam(默认) | psn | xbox | kakao | stadia\n"
                 "示例: /pubg shroud steam"
             )
             return
@@ -317,10 +317,11 @@ class PubgPlugin(Star):
             "Accept": "application/vnd.api+json",
         }
 
-        async with aiohttp.ClientSession(headers=headers) as session:
+        async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as session:
             player_data = await _get(
                 session,
-                f"{self.api_base}/{platform}/players?filter[playerNames]={player_name}",
+                f"{self.api_base}/{platform}/players",
+                params={"filter[playerNames]": player_name},
             )
 
             if not player_data.get("data"):
@@ -366,7 +367,7 @@ def _render_text(name, platform, gm_stats, player_id, match_results) -> str:
         wins = s.get("wins", 0); top10 = s.get("top10s", 0)
         kills = s.get("kills", 0); assists = s.get("assists", 0)
         damage = s.get("damageDealt", 0.0)
-        kd = kills / max(rounds - wins, 1)
+        kd = kills / rounds if rounds else 0
         lines += [
             f"▌{mode_label}",
             f"  场次 {rounds}  胜场 {wins}({wins/rounds*100:.1f}%)  Top10 {top10}({top10/rounds*100:.1f}%)",
@@ -427,8 +428,8 @@ def _fmt_date(iso: str) -> str:
         return iso[:10]
 
 
-async def _get(session: aiohttp.ClientSession, url: str) -> dict:
-    async with session.get(url) as resp:
+async def _get(session: aiohttp.ClientSession, url: str, params: dict = None) -> dict:
+    async with session.get(url, params=params) as resp:
         if resp.status == 404:
             raise PubgApiError("资源不存在 (404)")
         if resp.status == 401:

@@ -1,0 +1,12 @@
+{
+  "api_key": {
+    "description": "PUBG 开发者 API Key（申请地址: https://developer.pubg.com/）",
+    "type": "string",
+    "default": ""
+  },
+  "default_platform": {
+    "description": "默认查询平台，可选: steam | psn | xbox | kakao",
+    "type": "string",
+    "default": "steam"
+  }
+}

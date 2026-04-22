@@ -256,6 +256,8 @@ class PubgPlugin(Star):
         return self.config.get("default_platform", "steam")
 
     @filter.command("pubg")
+    @filter.command("查ID")
+    @filter.command("查询")
     async def query_stats(self, event: AstrMessageEvent):
         """用法: /pubg <玩家名> [平台]  平台可选: steam psn xbox kakao"""
         parts = event.message_str.strip().split()

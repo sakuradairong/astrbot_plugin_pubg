@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 import aiohttp
+from astrbot.core.star.star_tools import StarTools
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -408,6 +409,20 @@ class PubgPlugin(Star):
         logger.info(f"[pubg_plugin] 插件已加载，Pillow={'可用' if PIL_OK else '不可用（将回退为文字输出）'}")
         if not PIL_OK:
             logger.warning("[pubg_plugin] 未安装 Pillow，将回退为文字输出。pip install Pillow")
+        # Register as LLM function-calling tool for agent mode
+        try:
+            StarTools.register_llm_tool(
+                name="pubg_query",
+                func_args=[
+                    {"type": "string", "name": "player_name", "description": "PUBG 玩家游戏昵称，必须精确匹配"},
+                    {"type": "string", "name": "platform", "description": "游戏平台，可选: steam(默认), psn, xbox, kakao, stadia"},
+                ],
+                desc="查询 PUBG 玩家终身战绩和最近对局数据，包括 K/D、胜率、场均伤害、场均存活时间。当用户要求查询 PUBG 战绩时调用此工具。",
+                func_obj=self._pubg_lookup_tool,
+            )
+            logger.info("[pubg_plugin] 已注册 LLM 工具 pubg_query")
+        except Exception as e:
+            logger.warning(f"[pubg_plugin] 注册 LLM 工具失败: {e}")
 
     def _get_api_key(self) -> str:
         if self.config is None:
@@ -484,6 +499,17 @@ class PubgPlugin(Star):
                     os.remove(tmp_path)
                 except Exception:
                     pass
+
+    async def _pubg_lookup_tool(self, event, player_name: str, platform: str = "steam") -> str:
+        """Agent 可调用的 PUBG 查询工具函数。"""
+        api_key = self._get_api_key()
+        if not api_key:
+            return "未配置 PUBG API Key，请在插件配置中填写 api_key。"
+        try:
+            info, stats, matches = await self._fetch_all(player_name, platform, api_key)
+            return _render_text(info.name, info.platform, stats, info.id, matches, info.ban_type)
+        except PubgApiError as e:
+            return str(e)
 
     async def _fetch_all(self, player_name: str, platform: str, api_key: str):
         headers = {

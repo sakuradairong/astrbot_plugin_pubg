@@ -1,20 +1,26 @@
+from __future__ import annotations
+
 import asyncio
 import os
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 import aiohttp
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
 
 try:
     from PIL import Image, ImageDraw, ImageFont
     PIL_OK = True
 except ImportError:
     PIL_OK = False
+
+if TYPE_CHECKING:
+    from PIL import ImageDraw as IDraw
+    from PIL.ImageFont import FreeTypeFont, ImageFont as FontClass
 
 _MAP_NAMES = {
     "Baltic_Main":      "Erangel",
@@ -39,7 +45,7 @@ _MODE_LABELS = {
     "solo":      "单排TPP",
 }
 
-BAN_STATUS_LABELS = {
+_BAN_STATUS_LABELS = {
     "PermanentBan": "永久封禁",
     "TemporaryBan": "临时封禁",
     "Banned":       "封禁中",
@@ -74,7 +80,7 @@ class PlayerInfo:
     ban_type: Optional[str]
 
 
-def _load_font(size: int, bold: bool = False) -> "ImageFont.FreeTypeFont | ImageFont.ImageFont":
+def _load_font(size: int, bold: bool = False) -> FreeTypeFont | FontClass:
     candidates = [
         os.path.join(FONT_DIR, "NotoSansSC-Bold.ttf" if bold else "NotoSansSC-Regular.ttf"),
         "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
@@ -91,7 +97,7 @@ def _load_font(size: int, bold: bool = False) -> "ImageFont.FreeTypeFont | Image
     return ImageFont.load_default()
 
 
-def _text_w(draw: "ImageDraw.ImageDraw", text: str, font) -> int:
+def _text_w(draw: IDraw.ImageDraw, text: str, font: FreeTypeFont | FontClass) -> int:
     bbox = draw.textbbox((0, 0), text, font=font)
     return bbox[2] - bbox[0]
 
@@ -118,7 +124,7 @@ def _render_image(
             match_rows.append(entry)
 
     is_banned = ban_type is not None
-    ban_label = BAN_STATUS_LABELS.get(ban_type, ban_type) if ban_type else None
+    ban_label = _BAN_STATUS_LABELS.get(ban_type, ban_type) if ban_type else None
 
     H_HEADER    = 90
     H_BAN_BAR   = 32 if is_banned else 0
@@ -170,8 +176,6 @@ def _render_image(
         kills     = s.get("kills", 0)
         assists   = s.get("assists", 0)
         damage    = s.get("damageDealt", 0.0)
-        headshots = s.get("headshotKills", 0)
-        longest   = s.get("longestKill", 0.0)
         survived  = s.get("timeSurvived", 0.0)
 
         kd        = kills / rounds if rounds else 0
@@ -232,7 +236,12 @@ def _render_image(
     draw.text((PAD, y), f"数据来源: api.pubg.com  ·  {ts}", font=f_small, fill=SEP)
 
     buf = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-    img.save(buf.name, format="PNG")
+    try:
+        img.save(buf.name, format="PNG")
+    except Exception:
+        buf.close()
+        os.remove(buf.name)
+        raise
     buf.close()
     return buf.name
 
@@ -254,7 +263,7 @@ def _render_text(
     ]
 
     if ban_type:
-        ban_label = BAN_STATUS_LABELS.get(ban_type, ban_type)
+        ban_label = _BAN_STATUS_LABELS.get(ban_type, ban_type)
         lines += ["", f"⚠ 账号状态: {ban_label}", ""]
     else:
         lines += ["", f"✓ 账号状态: 正常", ""]
@@ -380,7 +389,7 @@ async def _api_request(
     "https://github.com/RainySY/astrbot_plugin_pubg",
 )
 class PubgPlugin(Star):
-    def __init__(self, context: Context, config=None):
+    def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
         self.config = config
         self.api_base = "https://api.pubg.com/shards"

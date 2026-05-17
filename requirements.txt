@@ -1,0 +1,3 @@
+astrbot>=3.0
+aiohttp>=3.9
+Pillow>=10.0

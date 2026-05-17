@@ -447,7 +447,7 @@ async def _api_request(
     "astrbot_plugin_pubg",
     "sakuradairong",
     "PUBG 玩家战绩查询插件",
-    "1.4.0",
+    "1.4.1",
     "https://github.com/sakuradairong/astrbot_plugin_pubg",
 )
 class PubgPlugin(Star):

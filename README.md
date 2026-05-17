@@ -18,7 +18,7 @@ AstrBot 插件 —— 查询 PUBG（绝地求生）玩家战绩。
 
 ```bash
 cd astrbot/plugins
-git clone https://github.com/RainySY/astrbot_plugin_pubg.git
+git clone https://github.com/sakuradairong/astrbot_plugin_pubg.git
 ```
 
 或下载压缩包解压到 `plugins/astrbot_plugin_pubg/` 目录。

@@ -395,10 +395,10 @@ async def _api_request(
 
 @register(
     "astrbot_plugin_pubg",
-    "RainySY",
+    "sakuradairong",
     "PUBG 玩家战绩查询插件",
     "1.3.0",
-    "https://github.com/RainySY/astrbot_plugin_pubg",
+    "https://github.com/sakuradairong/astrbot_plugin_pubg",
 )
 class PubgPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):

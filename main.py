@@ -82,12 +82,24 @@ class PlayerInfo:
 
 
 def _load_font(size: int, bold: bool = False) -> FreeTypeFont | FontClass:
+    # 1. Scan local fonts/ directory for any .ttf/.ttc
+    if os.path.isdir(FONT_DIR):
+        for fname in sorted(os.listdir(FONT_DIR)):
+            if fname.lower().endswith((".ttf", ".ttc", ".otf")):
+                path = os.path.join(FONT_DIR, fname)
+                try:
+                    return ImageFont.truetype(path, size)
+                except Exception:
+                    continue
+
+    # 2. Hardcoded well-known paths
     candidates = [
-        os.path.join(FONT_DIR, "NotoSansSC-Bold.ttf" if bold else "NotoSansSC-Regular.ttf"),
         "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf" if bold else "C:/Windows/Fonts/simsun.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSerifCJK-Bold.ttc" if bold else "/usr/share/fonts/truetype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -95,6 +107,23 @@ def _load_font(size: int, bold: bool = False) -> FreeTypeFont | FontClass:
                 return ImageFont.truetype(path, size)
             except Exception:
                 continue
+
+    # 3. Dynamic fontconfig lookup (Linux)
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["fc-match", "-f", "%{file}", "sans:lang=zh"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and (path := result.stdout.strip()):
+            # fc-match may return a font that doesn't handle CJK; try it
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return ImageFont.load_default()
 
 

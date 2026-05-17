@@ -104,23 +104,43 @@ def _load_font(size: int, bold: bool = False) -> FreeTypeFont | FontClass:
     for path in candidates:
         if os.path.exists(path):
             try:
-                return ImageFont.truetype(path, size)
+                return ImageFont.truetype(path, size, encoding="unic")
             except Exception:
                 continue
-
-    # 3. Dynamic fontconfig lookup (Linux)
+    # 3. Dynamic fontconfig lookup (Linux) — try specific CJK families first
     try:
         import subprocess
+        for pattern in (
+            "Noto Sans CJK SC:lang=zh",
+            "Noto Sans CJK:lang=zh",
+            "WenQuanYi Micro Hei:lang=zh",
+            "WenQuanYi Zen Hei:lang=zh",
+            "Droid Sans Fallback:lang=zh",
+            "sans:lang=zh",
+        ):
+            result = subprocess.run(
+                ["fc-match", "-f", "%{file}", pattern],
+                capture_output=True, text=True, timeout=5,
+            )
+            path = result.stdout.strip()
+            if path:
+                try:
+                    return ImageFont.truetype(path, size, encoding="unic")
+                except Exception:
+                    continue
+        # 4. fc-list :lang=zh — enumerate any available CJK font
         result = subprocess.run(
-            ["fc-match", "-f", "%{file}", "sans:lang=zh"],
+            ["fc-list", ":lang=zh", "-f", "%{file}\n"],
             capture_output=True, text=True, timeout=5,
         )
-        if result.returncode == 0 and (path := result.stdout.strip()):
-            # fc-match may return a font that doesn't handle CJK; try it
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                pass
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                path = line.strip()
+                if path:
+                    try:
+                        return ImageFont.truetype(path, size, encoding="unic")
+                    except Exception:
+                        continue
     except Exception:
         pass
 

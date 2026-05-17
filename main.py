@@ -578,7 +578,8 @@ class PubgPlugin(Star):
             player = player_data["data"][0]
             player_id = player["id"]
             player_name_real = player["attributes"]["name"]
-            ban_type = player["attributes"].get("banType") or None
+            raw_ban = player["attributes"].get("banType")
+            ban_type = raw_ban if raw_ban and raw_ban not in ("Innocent", "NotBanned") else None
 
             logger.info(f"[pubg_plugin] 玩家 {player_name_real} banType={ban_type}")
 

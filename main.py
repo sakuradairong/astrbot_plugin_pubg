@@ -434,9 +434,7 @@ class PubgPlugin(Star):
             return "steam"
         return self.config.get("default_platform", "steam")
 
-    @filter.command("pubg")
-    @filter.command("查ID")
-    @filter.command("查询")
+    @filter.command("pubg", alias={"查ID", "查询"})
     async def query_stats(self, event: AstrMessageEvent):
         logger.info(f"[pubg_plugin] query_stats 被调用: message={event.message_str!r}")
         parts = event.message_str.strip().split()

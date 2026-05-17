@@ -101,6 +101,13 @@ def _text_w(draw: IDraw.ImageDraw, text: str, font: FreeTypeFont | FontClass) ->
     bbox = draw.textbbox((0, 0), text, font=font)
     return bbox[2] - bbox[0]
 
+def _truncate_text(draw: IDraw.ImageDraw, text: str, font: FreeTypeFont | FontClass, max_px: int) -> str:
+    if _text_w(draw, text, font) <= max_px:
+        return text
+    while text and _text_w(draw, text + "…", font) > max_px:
+        text = text[:-1]
+    return text + "…"
+
 
 def _render_image(
     name: str,
@@ -115,7 +122,7 @@ def _render_image(
         s = gm_stats.get(mode_key, {})
         if s.get("roundsPlayed", 0) == 0:
             continue
-        mode_rows.append((mode_key, mode_label, s))
+        mode_rows.append((mode_label, s))
 
     match_rows = []
     for match_data in match_results:
@@ -136,7 +143,7 @@ def _render_image(
     total_h = (
         PAD + H_HEADER + PAD + H_BAN_BAR
         + H_SEC_TITLE + len(mode_rows) * (H_MODE_ROW + 10)
-        + (PAD + H_SEC_TITLE + len(match_rows) * (H_MATCH_ROW + 8) if match_rows else 0)
+        + (PAD // 2 + H_SEC_TITLE + len(match_rows) * (H_MATCH_ROW + 8) if match_rows else 0)
         + H_FOOTER + PAD
     )
 
@@ -150,9 +157,9 @@ def _render_image(
     f_small = _load_font(15)
 
     y = PAD
-
     draw.rectangle([PAD, y, W - PAD, y + H_HEADER - 10], fill=CARD, outline=ACCENT, width=2)
-    draw.text((PAD + 18, y + 14), name, font=f_big, fill=ACCENT)
+    name_max_w = COL_W - 36 - _text_w(draw, "PUBG 战绩", f_med) - 28
+    draw.text((PAD + 18, y + 14), _truncate_text(draw, name, f_big, name_max_w), font=f_big, fill=ACCENT)
     draw.text((PAD + 18, y + 50), f"[{platform.upper()}]", font=f_norm, fill=GRAY)
     draw.text((W - PAD - 18 - _text_w(draw, "PUBG 战绩", f_med), y + 28), "PUBG 战绩", font=f_med, fill=ACCENT2)
     y += H_HEADER + PAD // 2
@@ -169,7 +176,7 @@ def _render_image(
     draw.line([(PAD, y + 30), (W - PAD, y + 30)], fill=ACCENT, width=1)
     y += H_SEC_TITLE
 
-    for _, mode_label, s in mode_rows:
+    for mode_label, s in mode_rows:
         rounds    = s.get("roundsPlayed", 0)
         wins      = s.get("wins", 0)
         top10     = s.get("top10s", 0)
@@ -351,10 +358,15 @@ async def _api_request(
     url: str,
     params: Optional[dict] = None,
     retry: int = 0,
+    request_timeout: int = 10,
 ) -> dict:
     for attempt in range(retry + 1):
         try:
-            async with session.get(url, params=params) as resp:
+            async with session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=request_timeout),
+            ) as resp:
                 if resp.status == 404:
                     raise PubgApiError("资源不存在 (404)")
                 if resp.status == 401:
@@ -393,6 +405,7 @@ class PubgPlugin(Star):
         super().__init__(context)
         self.config = config
         self.api_base = "https://api.pubg.com/shards"
+        logger.info(f"[pubg_plugin] 插件已加载，Pillow={'可用' if PIL_OK else '不可用（将回退为文字输出）'}")
         if not PIL_OK:
             logger.warning("[pubg_plugin] 未安装 Pillow，将回退为文字输出。pip install Pillow")
 
@@ -410,6 +423,7 @@ class PubgPlugin(Star):
     @filter.command("查ID")
     @filter.command("查询")
     async def query_stats(self, event: AstrMessageEvent):
+        logger.info(f"[pubg_plugin] query_stats 被调用: message={event.message_str!r}")
         parts = event.message_str.strip().split()
         if len(parts) < 2:
             yield event.plain_result(
@@ -421,6 +435,7 @@ class PubgPlugin(Star):
 
         player_name = parts[1]
         platform = parts[2].lower() if len(parts) > 2 else self._get_platform()
+        logger.info(f"[pubg_plugin] 开始查询: player={player_name}, platform={platform}")
 
         valid_platforms = {"steam", "psn", "xbox", "kakao", "stadia"}
         if platform not in valid_platforms:
@@ -476,10 +491,7 @@ class PubgPlugin(Star):
             "Accept": "application/vnd.api+json",
         }
 
-        async with aiohttp.ClientSession(
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
-        ) as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             player_data = await _api_request(
                 session,
                 f"{self.api_base}/{platform}/players",
@@ -503,8 +515,9 @@ class PubgPlugin(Star):
                                 .get("matches", {})
                                 .get("data", [])
             ][:MATCH_LIMIT]
+            logger.info(f"[pubg_plugin] 获取该玩家的 {len(match_ids)} 场对局详情")
 
-            lifetime_data, *match_results = await asyncio.gather(
+            results = await asyncio.gather(
                 _api_request(
                     session,
                     f"{self.api_base}/{platform}/players/{player_id}/seasons/lifetime",
@@ -518,7 +531,23 @@ class PubgPlugin(Star):
                     )
                     for mid in match_ids
                 ],
+                return_exceptions=True,
             )
+
+        lifetime_data = results[0]
+        match_results_raw = results[1:]
+
+        if isinstance(lifetime_data, Exception):
+            if isinstance(lifetime_data, PubgApiError):
+                raise lifetime_data
+            raise PubgApiError(f"获取生涯数据失败: {lifetime_data}")
+
+        match_results = [
+            r for r in match_results_raw
+            if not isinstance(r, Exception)
+        ]
+        if match_results_raw and not match_results:
+            logger.warning("[pubg_plugin] 所有对局详情获取失败，仅显示生涯数据")
 
         gm_stats = lifetime_data["data"]["attributes"]["gameModeStats"]
         player_info = PlayerInfo(

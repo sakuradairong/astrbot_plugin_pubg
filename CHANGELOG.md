@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 1.4.2 (2026-05-18)
+
+### 修复
+- **崩溃修复**：`_pubg_lookup_tool` 在 LLM Function Calling 模式下，`player_name` 被错误绑定为 `AiocqhttpMessageEvent` 对象，导致 `_api_request` → aiohttp/yarl 拼接 URL 参数时抛出 `TypeError: Invalid variable type`
+
+### 变更
+- `_pubg_lookup_tool`：增加 `player_name` 非字符串类型检测与事件对象恢复逻辑
+- `_fetch_all`：增加 `player_name`/`platform` 类型防御和自动转换
+- `_api_request`：增加 `params` 参数清洗，自动过滤非法类型值
+
 ## 1.4.1 (2026-05-17)
 
 ### 修复

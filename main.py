@@ -410,6 +410,12 @@ async def _api_request(
     retry: int = 0,
     request_timeout: int = 10,
 ) -> dict:
+    # 参数清洗：仅保留 str / int / float 类型的值，过滤 event 等非法对象
+    if params is not None:
+        params = {
+            k: v for k, v in params.items()
+            if isinstance(v, (str, int, float))
+        }
     for attempt in range(retry + 1):
         try:
             async with session.get(
@@ -447,7 +453,7 @@ async def _api_request(
     "astrbot_plugin_pubg",
     "sakuradairong",
     "PUBG 玩家战绩查询插件",
-    "1.4.1",
+    "1.4.2",
     "https://github.com/sakuradairong/astrbot_plugin_pubg",
 )
 class PubgPlugin(Star):
@@ -547,8 +553,30 @@ class PubgPlugin(Star):
                 except Exception:
                     pass
 
-    async def _pubg_lookup_tool(self, event, player_name: str, platform: str = "steam") -> str:
+    async def _pubg_lookup_tool(self, event, player_name: str = "", platform: str = "steam") -> str:
         """Agent 可调用的 PUBG 查询工具函数。"""
+        # === 参数防御：确保 player_name 是纯字符串，而非 event 对象 ===
+        if not isinstance(player_name, str):
+            logger.warning(f"[pubg_plugin] _pubg_lookup_tool: player_name 类型异常 ({type(player_name).__name__}), 尝试修复")
+            if isinstance(player_name, AstrMessageEvent):
+                # event 被当作 player_name 传入，尝试从消息中提取玩家名
+                raw = player_name.message_str.strip()
+                parts = raw.split()
+                # 格式可能为 "/pubg <name>"、"查询 <name>" 或直接 "<name>"
+                if len(parts) >= 2 and parts[0] in ("/pubg", "pubg", "查ID", "查询"):
+                    player_name = parts[1]
+                elif len(parts) >= 1:
+                    player_name = parts[0]
+                else:
+                    return "请提供玩家昵称。用法: /pubg <玩家名> [平台]"
+            else:
+                player_name = str(player_name)
+        # 确保 platform 是字符串
+        if not isinstance(platform, str):
+            platform = str(platform) if isinstance(platform, (int, float)) else "steam"
+        # 校验 player_name 非空
+        if not player_name.strip():
+            return "玩家昵称不能为空。用法: /pubg <玩家名> [平台]"
         api_key = self._get_api_key()
         if not api_key:
             return "未配置 PUBG API Key，请在插件配置中填写 api_key。"
@@ -559,6 +587,12 @@ class PubgPlugin(Star):
             return str(e)
 
     async def _fetch_all(self, player_name: str, platform: str, api_key: str):
+        # 参数防御：确保 player_name 和 platform 是字符串
+        if not isinstance(player_name, str):
+            logger.warning(f"[pubg_plugin] _fetch_all: player_name 类型异常 ({type(player_name).__name__}), 强制转换")
+            player_name = str(player_name)
+        if not isinstance(platform, str):
+            platform = str(platform)
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/vnd.api+json",

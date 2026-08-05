@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 import aiohttp
-from astrbot.core.star.star_tools import StarTools
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -52,6 +53,8 @@ _BAN_STATUS_LABELS = {
     "Banned":       "封禁中",
 }
 
+VALID_PLATFORMS = frozenset({"steam", "psn", "xbox", "kakao"})
+
 # ── 颜色主题 ──
 BG       = (15,  20,  30)
 CARD     = (25,  32,  48)
@@ -68,9 +71,13 @@ PAD      = 32
 COL_W    = 560
 FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 
-API_TIMEOUT    = 15
-API_MAX_RETRY  = 2
-MATCH_LIMIT    = 7
+API_TIMEOUT         = 10
+API_MAX_RETRY       = 2
+MATCH_LIMIT         = 7
+MATCH_CONCURRENCY   = 3
+QUERY_COOLDOWN_SEC  = 8
+
+_font_cache: dict[tuple[int, bool], object] = {}
 
 
 @dataclass
@@ -81,8 +88,83 @@ class PlayerInfo:
     ban_type: Optional[str]
 
 
+@dataclass(frozen=True)
+class ModeStatRow:
+    label: str
+    rounds: int
+    wins: int
+    top10: int
+    kills: int
+    assists: int
+    deaths: int
+    kd: float
+    win_pct: float
+    top10_pct: float
+    avg_dmg: float
+    avg_min: float
+
+
+def _calc_kd(kills: int | float, deaths: int | float) -> float:
+    """K/D = kills / deaths；deaths 为 0 时回退为击杀数。"""
+    kills_f = float(kills or 0)
+    deaths_f = float(deaths or 0)
+    if deaths_f <= 0:
+        return kills_f
+    return kills_f / deaths_f
+
+
+def _normalize_ban_type(raw_ban: Optional[str]) -> Optional[str]:
+    if raw_ban and raw_ban not in ("Innocent", "NotBanned"):
+        return raw_ban
+    return None
+
+
+def _mode_stat_rows(gm_stats: dict) -> list[ModeStatRow]:
+    rows: list[ModeStatRow] = []
+    for mode_key, mode_label in _MODE_LABELS.items():
+        s = gm_stats.get(mode_key, {})
+        rounds = s.get("roundsPlayed", 0) or 0
+        if rounds == 0:
+            continue
+        wins = s.get("wins", 0) or 0
+        top10 = s.get("top10s", 0) or 0
+        kills = s.get("kills", 0) or 0
+        assists = s.get("assists", 0) or 0
+        deaths = s.get("deaths", 0) or 0
+        damage = float(s.get("damageDealt", 0.0) or 0.0)
+        survived = float(s.get("timeSurvived", 0.0) or 0.0)
+        rows.append(
+            ModeStatRow(
+                label=mode_label,
+                rounds=rounds,
+                wins=wins,
+                top10=top10,
+                kills=kills,
+                assists=assists,
+                deaths=deaths,
+                kd=_calc_kd(kills, deaths),
+                win_pct=wins / rounds * 100,
+                top10_pct=top10 / rounds * 100,
+                avg_dmg=damage / rounds,
+                avg_min=survived / rounds / 60,
+            )
+        )
+    return rows
+
+
 def _load_font(size: int, bold: bool = False) -> FreeTypeFont | FontClass:
-    # 1. Scan local fonts/ directory for any .ttf/.ttc
+    cache_key = (size, bold)
+    cached = _font_cache.get(cache_key)
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+
+    font = _discover_font(size, bold)
+    _font_cache[cache_key] = font
+    return font
+
+
+def _discover_font(size: int, bold: bool = False) -> FreeTypeFont | FontClass:
+    # 1. Scan local fonts/ directory for any .ttf/.ttc/.otf
     if os.path.isdir(FONT_DIR):
         for fname in sorted(os.listdir(FONT_DIR)):
             if fname.lower().endswith((".ttf", ".ttc", ".otf")):
@@ -107,9 +189,9 @@ def _load_font(size: int, bold: bool = False) -> FreeTypeFont | FontClass:
                 return ImageFont.truetype(path, size, encoding="unic")
             except Exception:
                 continue
-    # 3. Dynamic fontconfig lookup (Linux) — try specific CJK families first
+
+    # 3. Dynamic fontconfig lookup (Linux)
     try:
-        import subprocess
         for pattern in (
             "Noto Sans CJK SC:lang=zh",
             "Noto Sans CJK:lang=zh",
@@ -128,7 +210,6 @@ def _load_font(size: int, bold: bool = False) -> FreeTypeFont | FontClass:
                     return ImageFont.truetype(path, size, encoding="unic")
                 except Exception:
                     continue
-        # 4. fc-list :lang=zh — enumerate any available CJK font
         result = subprocess.run(
             ["fc-list", ":lang=zh", "-f", "%{file}\n"],
             capture_output=True, text=True, timeout=5,
@@ -151,6 +232,7 @@ def _text_w(draw: IDraw.ImageDraw, text: str, font: FreeTypeFont | FontClass) ->
     bbox = draw.textbbox((0, 0), text, font=font)
     return bbox[2] - bbox[0]
 
+
 def _truncate_text(draw: IDraw.ImageDraw, text: str, font: FreeTypeFont | FontClass, max_px: int) -> str:
     if _text_w(draw, text, font) <= max_px:
         return text
@@ -167,12 +249,7 @@ def _render_image(
     match_results: list,
     ban_type: Optional[str] = None,
 ) -> str:
-    mode_rows = []
-    for mode_key, mode_label in _MODE_LABELS.items():
-        s = gm_stats.get(mode_key, {})
-        if s.get("roundsPlayed", 0) == 0:
-            continue
-        mode_rows.append((mode_label, s))
+    mode_rows = _mode_stat_rows(gm_stats)
 
     match_rows = []
     for match_data in match_results:
@@ -187,12 +264,16 @@ def _render_image(
     H_BAN_BAR   = 32 if is_banned else 0
     H_SEC_TITLE = 44
     H_MODE_ROW  = 110
+    H_EMPTY_ROW = 40
     H_MATCH_ROW = 80
     H_FOOTER    = 36
 
+    mode_block_h = (
+        len(mode_rows) * (H_MODE_ROW + 10) if mode_rows else H_EMPTY_ROW
+    )
     total_h = (
         PAD + H_HEADER + PAD + H_BAN_BAR
-        + H_SEC_TITLE + len(mode_rows) * (H_MODE_ROW + 10)
+        + H_SEC_TITLE + mode_block_h
         + (PAD // 2 + H_SEC_TITLE + len(match_rows) * (H_MATCH_ROW + 8) if match_rows else 0)
         + H_FOOTER + PAD
     )
@@ -226,39 +307,29 @@ def _render_image(
     draw.line([(PAD, y + 30), (W - PAD, y + 30)], fill=ACCENT, width=1)
     y += H_SEC_TITLE
 
-    for mode_label, s in mode_rows:
-        rounds    = s.get("roundsPlayed", 0)
-        wins      = s.get("wins", 0)
-        top10     = s.get("top10s", 0)
-        kills     = s.get("kills", 0)
-        assists   = s.get("assists", 0)
-        damage    = s.get("damageDealt", 0.0)
-        survived  = s.get("timeSurvived", 0.0)
+    if not mode_rows:
+        draw.text((PAD + 16, y + 8), "暂无战绩数据", font=f_norm, fill=GRAY)
+        y += H_EMPTY_ROW
+    else:
+        for row in mode_rows:
+            draw.rectangle([PAD, y, W - PAD, y + H_MODE_ROW], fill=CARD)
+            draw.rectangle([PAD, y, PAD + 8, y + H_MODE_ROW], fill=ACCENT2)
+            draw.text((PAD + 16, y + 10), row.label, font=f_med, fill=WHITE)
 
-        kd        = kills / rounds if rounds else 0
-        win_pct   = wins  / rounds * 100
-        top10_pct = top10 / rounds * 100
-        avg_dmg   = damage / rounds
-        avg_min   = survived / rounds / 60
+            col1_x = PAD + 16
+            col2_x = PAD + 16 + (COL_W // 3)
+            col3_x = PAD + 16 + (COL_W // 3) * 2
+            row2_y = y + 42
+            row3_y = y + 72
 
-        draw.rectangle([PAD, y, W - PAD, y + H_MODE_ROW], fill=CARD)
-        draw.rectangle([PAD, y, PAD + 8, y + H_MODE_ROW], fill=ACCENT2)
-        draw.text((PAD + 16, y + 10), mode_label, font=f_med, fill=WHITE)
+            draw.text((col1_x, row2_y), f"场次  {row.rounds}", font=f_norm, fill=GRAY)
+            draw.text((col2_x, row2_y), f"胜场  {row.wins} ({row.win_pct:.1f}%)", font=f_norm, fill=WIN_CLR)
+            draw.text((col3_x, row2_y), f"Top10  {row.top10} ({row.top10_pct:.1f}%)", font=f_norm, fill=GRAY)
+            draw.text((col1_x, row3_y), f"K/D  {row.kd:.2f}", font=f_norm, fill=ACCENT)
+            draw.text((col2_x, row3_y), f"场均伤害  {row.avg_dmg:.0f}", font=f_norm, fill=WHITE)
+            draw.text((col3_x, row3_y), f"场均存活  {row.avg_min:.1f}min", font=f_norm, fill=GRAY)
 
-        col1_x = PAD + 16
-        col2_x = PAD + 16 + (COL_W // 3)
-        col3_x = PAD + 16 + (COL_W // 3) * 2
-        row2_y = y + 42
-        row3_y = y + 72
-
-        draw.text((col1_x, row2_y), f"场次  {rounds}", font=f_norm, fill=GRAY)
-        draw.text((col2_x, row2_y), f"胜场  {wins} ({win_pct:.1f}%)", font=f_norm, fill=WIN_CLR)
-        draw.text((col3_x, row2_y), f"Top10  {top10} ({top10_pct:.1f}%)", font=f_norm, fill=GRAY)
-        draw.text((col1_x, row3_y), f"K/D  {kd:.2f}", font=f_norm, fill=ACCENT)
-        draw.text((col2_x, row3_y), f"场均伤害  {avg_dmg:.0f}", font=f_norm, fill=WHITE)
-        draw.text((col3_x, row3_y), f"场均存活  {avg_min:.1f}min", font=f_norm, fill=GRAY)
-
-        y += H_MODE_ROW + 10
+            y += H_MODE_ROW + 10
 
     if match_rows:
         y += PAD // 2
@@ -323,32 +394,22 @@ def _render_text(
         ban_label = _BAN_STATUS_LABELS.get(ban_type, ban_type)
         lines += ["", f"⚠ 账号状态: {ban_label}", ""]
     else:
-        lines += ["", f"✓ 账号状态: 正常", ""]
+        lines += ["", "✓ 账号状态: 正常", ""]
 
     lines += ["", "◆ 终身战绩", bar]
 
-    has_any = False
-    for mode_key, mode_label in _MODE_LABELS.items():
-        s = gm_stats.get(mode_key, {})
-        rounds = s.get("roundsPlayed", 0)
-        if rounds == 0:
-            continue
-        has_any = True
-        wins = s.get("wins", 0)
-        top10 = s.get("top10s", 0)
-        kills = s.get("kills", 0)
-        assists = s.get("assists", 0)
-        damage = s.get("damageDealt", 0.0)
-        kd = kills / rounds if rounds else 0
-        lines += [
-            f"▌{mode_label}",
-            f"  场次 {rounds}  胜场 {wins}({wins/rounds*100:.1f}%)  Top10 {top10}({top10/rounds*100:.1f}%)",
-            f"  击杀 {kills}  助攻 {assists}  K/D {kd:.2f}",
-            f"  场均伤害 {damage/rounds:.0f}  场均存活 {s.get('timeSurvived',0)/rounds/60:.1f}min",
-            "",
-        ]
-    if not has_any:
+    mode_rows = _mode_stat_rows(gm_stats)
+    if not mode_rows:
         lines += ["  暂无战绩数据", ""]
+    else:
+        for row in mode_rows:
+            lines += [
+                f"▌{row.label}",
+                f"  场次 {row.rounds}  胜场 {row.wins}({row.win_pct:.1f}%)  Top10 {row.top10}({row.top10_pct:.1f}%)",
+                f"  击杀 {row.kills}  死亡 {row.deaths}  助攻 {row.assists}  K/D {row.kd:.2f}",
+                f"  场均伤害 {row.avg_dmg:.0f}  场均存活 {row.avg_min:.1f}min",
+                "",
+            ]
 
     if match_results:
         lines += ["◆ 最近对局", bar]
@@ -408,7 +469,7 @@ async def _api_request(
     url: str,
     params: Optional[dict] = None,
     retry: int = 0,
-    request_timeout: int = 10,
+    request_timeout: int = API_TIMEOUT,
 ) -> dict:
     # 参数清洗：仅保留 str / int / float 类型的值，过滤 event 等非法对象
     if params is not None:
@@ -453,7 +514,7 @@ async def _api_request(
     "astrbot_plugin_pubg",
     "sakuradairong",
     "PUBG 玩家战绩查询插件",
-    "1.4.2",
+    "1.5.0",
     "https://github.com/sakuradairong/astrbot_plugin_pubg",
 )
 class PubgPlugin(Star):
@@ -461,23 +522,10 @@ class PubgPlugin(Star):
         super().__init__(context)
         self.config = config
         self.api_base = "https://api.pubg.com/shards"
+        self._cooldown_until: dict[str, float] = {}
         logger.info(f"[pubg_plugin] 插件已加载，Pillow={'可用' if PIL_OK else '不可用（将回退为文字输出）'}")
         if not PIL_OK:
             logger.warning("[pubg_plugin] 未安装 Pillow，将回退为文字输出。pip install Pillow")
-        # Register as LLM function-calling tool for agent mode
-        try:
-            StarTools.register_llm_tool(
-                name="pubg_query",
-                func_args=[
-                    {"type": "string", "name": "player_name", "description": "PUBG 玩家游戏昵称，必须精确匹配"},
-                    {"type": "string", "name": "platform", "description": "游戏平台，可选: steam(默认), psn, xbox, kakao, stadia"},
-                ],
-                desc="查询 PUBG 玩家终身战绩和最近对局数据，包括 K/D、胜率、场均伤害、场均存活时间。当用户要求查询 PUBG 战绩时调用此工具。",
-                func_obj=self._pubg_lookup_tool,
-            )
-            logger.info("[pubg_plugin] 已注册 LLM 工具 pubg_query")
-        except Exception as e:
-            logger.warning(f"[pubg_plugin] 注册 LLM 工具失败: {e}")
 
     def _get_api_key(self) -> str:
         if self.config is None:
@@ -487,16 +535,31 @@ class PubgPlugin(Star):
     def _get_platform(self) -> str:
         if self.config is None:
             return "steam"
-        return self.config.get("default_platform", "steam")
+        platform = str(self.config.get("default_platform", "steam")).lower()
+        return platform if platform in VALID_PLATFORMS else "steam"
 
-    @filter.command("pubg", alias={"查ID", "查询"})
+    def _check_cooldown(self, sender_id: str) -> Optional[float]:
+        """若仍在冷却中，返回剩余秒数；否则登记本次查询并返回 None。"""
+        now = time.monotonic()
+        until = self._cooldown_until.get(sender_id, 0.0)
+        if until > now:
+            return until - now
+        self._cooldown_until[sender_id] = now + QUERY_COOLDOWN_SEC
+        # 清理过期条目，避免无限增长
+        if len(self._cooldown_until) > 256:
+            self._cooldown_until = {
+                k: v for k, v in self._cooldown_until.items() if v > now
+            }
+        return None
+
+    @filter.command("pubg", alias={"查ID", "查pubg"})
     async def query_stats(self, event: AstrMessageEvent):
         logger.info(f"[pubg_plugin] query_stats 被调用: message={event.message_str!r}")
         parts = event.message_str.strip().split()
         if len(parts) < 2:
             yield event.plain_result(
                 "用法: /pubg <玩家名> [平台]\n"
-                "平台可选: steam(默认) | psn | xbox | kakao | stadia\n"
+                "平台可选: steam(默认) | psn | xbox | kakao\n"
                 "示例: /pubg shroud steam"
             )
             return
@@ -505,10 +568,9 @@ class PubgPlugin(Star):
         platform = parts[2].lower() if len(parts) > 2 else self._get_platform()
         logger.info(f"[pubg_plugin] 开始查询: player={player_name}, platform={platform}")
 
-        valid_platforms = {"steam", "psn", "xbox", "kakao", "stadia"}
-        if platform not in valid_platforms:
+        if platform not in VALID_PLATFORMS:
             yield event.plain_result(
-                f"不支持的平台: {platform}\n可选: {', '.join(sorted(valid_platforms))}"
+                f"不支持的平台: {platform}\n可选: {', '.join(sorted(VALID_PLATFORMS))}"
             )
             return
 
@@ -518,6 +580,17 @@ class PubgPlugin(Star):
                 "未配置 PUBG API Key，请在插件配置中填写 api_key。\n"
                 "申请地址: https://developer.pubg.com/"
             )
+            return
+
+        sender_id = ""
+        try:
+            sender_id = str(event.get_sender_id())
+        except Exception:
+            sender_id = event.get_session_id() if hasattr(event, "get_session_id") else "unknown"
+
+        remaining = self._check_cooldown(sender_id)
+        if remaining is not None:
+            yield event.plain_result(f"查询过于频繁，请 {remaining:.0f} 秒后再试。")
             return
 
         yield event.plain_result(f"正在查询 {player_name} 的战绩，请稍候…")
@@ -553,46 +626,50 @@ class PubgPlugin(Star):
                 except Exception:
                     pass
 
-    async def _pubg_lookup_tool(self, event, player_name: str = "", platform: str = "steam") -> str:
-        """Agent 可调用的 PUBG 查询工具函数。"""
-        # === 参数防御：确保 player_name 是纯字符串，而非 event 对象 ===
-        if not isinstance(player_name, str):
-            logger.warning(f"[pubg_plugin] _pubg_lookup_tool: player_name 类型异常 ({type(player_name).__name__}), 尝试修复")
-            if isinstance(player_name, AstrMessageEvent):
-                # event 被当作 player_name 传入，尝试从消息中提取玩家名
-                raw = player_name.message_str.strip()
-                parts = raw.split()
-                # 格式可能为 "/pubg <name>"、"查询 <name>" 或直接 "<name>"
-                if len(parts) >= 2 and parts[0] in ("/pubg", "pubg", "查ID", "查询"):
-                    player_name = parts[1]
-                elif len(parts) >= 1:
-                    player_name = parts[0]
-                else:
-                    return "请提供玩家昵称。用法: /pubg <玩家名> [平台]"
-            else:
-                player_name = str(player_name)
-        # 确保 platform 是字符串
+    @filter.llm_tool(name="pubg_query")
+    async def pubg_query_tool(
+        self,
+        event: AstrMessageEvent,
+        player_name: str,
+        platform: str = "steam",
+    ) -> str:
+        """查询 PUBG 玩家终身战绩和最近对局数据，包括 K/D、胜率、场均伤害、场均存活时间。
+
+        Args:
+            player_name(string): PUBG 玩家游戏昵称，必须精确匹配
+            platform(string): 游戏平台，可选: steam(默认), psn, xbox, kakao
+        """
+        if not isinstance(player_name, str) or not player_name.strip():
+            return "请提供玩家昵称。用法: /pubg <玩家名> [平台]"
         if not isinstance(platform, str):
-            platform = str(platform) if isinstance(platform, (int, float)) else "steam"
-        # 校验 player_name 非空
-        if not player_name.strip():
-            return "玩家昵称不能为空。用法: /pubg <玩家名> [平台]"
+            platform = "steam"
+        platform = platform.lower().strip() or "steam"
+        if platform not in VALID_PLATFORMS:
+            return f"不支持的平台: {platform}。可选: {', '.join(sorted(VALID_PLATFORMS))}"
+
         api_key = self._get_api_key()
         if not api_key:
             return "未配置 PUBG API Key，请在插件配置中填写 api_key。"
+
         try:
-            info, stats, matches = await self._fetch_all(player_name, platform, api_key)
+            info, stats, matches = await self._fetch_all(player_name.strip(), platform, api_key)
             return _render_text(info.name, info.platform, stats, info.id, matches, info.ban_type)
         except PubgApiError as e:
             return str(e)
+        except Exception as e:
+            logger.error(f"[pubg_plugin] LLM 工具查询异常: {e}")
+            return "查询时发生未知错误，请稍后重试。"
 
     async def _fetch_all(self, player_name: str, platform: str, api_key: str):
-        # 参数防御：确保 player_name 和 platform 是字符串
         if not isinstance(player_name, str):
             logger.warning(f"[pubg_plugin] _fetch_all: player_name 类型异常 ({type(player_name).__name__}), 强制转换")
             player_name = str(player_name)
         if not isinstance(platform, str):
             platform = str(platform)
+        platform = platform.lower()
+        if platform not in VALID_PLATFORMS:
+            raise PubgApiError(f"不支持的平台: {platform}")
+
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/vnd.api+json",
@@ -612,8 +689,7 @@ class PubgPlugin(Star):
             player = player_data["data"][0]
             player_id = player["id"]
             player_name_real = player["attributes"]["name"]
-            raw_ban = player["attributes"].get("banType")
-            ban_type = raw_ban if raw_ban and raw_ban not in ("Innocent", "NotBanned") else None
+            ban_type = _normalize_ban_type(player["attributes"].get("banType"))
 
             logger.info(f"[pubg_plugin] 玩家 {player_name_real} banType={ban_type}")
 
@@ -625,30 +701,20 @@ class PubgPlugin(Star):
             ][:MATCH_LIMIT]
             logger.info(f"[pubg_plugin] 获取该玩家的 {len(match_ids)} 场对局详情")
 
-            results = await asyncio.gather(
+            lifetime_task = asyncio.create_task(
                 _api_request(
                     session,
                     f"{self.api_base}/{platform}/players/{player_id}/seasons/lifetime",
                     retry=API_MAX_RETRY,
-                ),
-                *[
-                    _api_request(
-                        session,
-                        f"{self.api_base}/{platform}/matches/{mid}",
-                        retry=API_MAX_RETRY,
-                    )
-                    for mid in match_ids
-                ],
-                return_exceptions=True,
+                )
             )
-
-        lifetime_data = results[0]
-        match_results_raw = results[1:]
-
-        if isinstance(lifetime_data, Exception):
-            if isinstance(lifetime_data, PubgApiError):
-                raise lifetime_data
-            raise PubgApiError(f"获取生涯数据失败: {lifetime_data}")
+            match_results_raw = await self._fetch_matches(session, platform, match_ids)
+            try:
+                lifetime_data = await lifetime_task
+            except PubgApiError:
+                raise
+            except Exception as e:
+                raise PubgApiError(f"获取生涯数据失败: {e}") from e
 
         match_results = [
             r for r in match_results_raw
@@ -665,6 +731,29 @@ class PubgPlugin(Star):
             ban_type=ban_type,
         )
         return player_info, gm_stats, match_results
+
+    async def _fetch_matches(
+        self,
+        session: aiohttp.ClientSession,
+        platform: str,
+        match_ids: list[str],
+    ) -> list:
+        if not match_ids:
+            return []
+        sem = asyncio.Semaphore(MATCH_CONCURRENCY)
+
+        async def _one(mid: str):
+            async with sem:
+                try:
+                    return await _api_request(
+                        session,
+                        f"{self.api_base}/{platform}/matches/{mid}",
+                        retry=API_MAX_RETRY,
+                    )
+                except Exception as e:
+                    return e
+
+        return list(await asyncio.gather(*[_one(mid) for mid in match_ids]))
 
 
 class PubgApiError(Exception):

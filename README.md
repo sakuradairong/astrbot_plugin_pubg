@@ -9,8 +9,9 @@ AstrBot 插件 —— 查询 PUBG（绝地求生）玩家战绩。
 - 查询玩家终身战绩（按模式展示：单排/双排/四排 × TPP/FPP）
 - 最近对局列表（击杀、伤害、助攻、爆头、最远击杀、存活时间）
 - 自动检测账号封禁状态
-- 跨平台支持：steam、psn、xbox、kakao、stadia
+- 跨平台支持：steam、psn、xbox、kakao
 - 图片输出（检测到吃鸡时高亮卡片）/ 文字回退
+- Agent 模式 LLM 工具 `pubg_query`
 
 ## 安装
 
@@ -61,11 +62,11 @@ pip install -r requirements.txt
 ```
 /pubg <玩家名> [平台]
 /查ID <玩家名> [平台]
-/查询 <玩家名> [平台]
+/查pubg <玩家名> [平台]
 ```
 
 - `<玩家名>` — PUBG 游戏内昵称（必需）
-- `[平台]` — 可选，默认 `steam`。支持：`steam`、`psn`、`xbox`、`kakao`、`stadia`
+- `[平台]` — 可选，默认 `steam`。支持：`steam`、`psn`、`xbox`、`kakao`
 
 ### 示例
 
@@ -94,4 +95,4 @@ pip install -r requirements.txt
 
 ## LICENSE
 
-本项目代码仅供学习参考，使用请遵守相关法律法规及 PUBG API 使用条款。
+MIT License。使用请同时遵守相关法律法规及 PUBG API 使用条款。

@@ -22,3 +22,8 @@ Thumbs.db
 # Project specific
 fonts/
 *.png
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/

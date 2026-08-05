@@ -5,7 +5,7 @@
     "default": ""
   },
   "default_platform": {
-    "description": "默认查询平台，可选: steam | psn | xbox | kakao | stadia",
+    "description": "默认查询平台，可选: steam | psn | xbox | kakao",
     "type": "string",
     "default": "steam"
   }

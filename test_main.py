@@ -1,5 +1,8 @@
-"""Unit tests for pure helpers in main.py."""
+"""Offline tests for PUBG queries and rendering."""
 from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import main as pubg
 
@@ -48,6 +51,15 @@ def test_mode_stat_rows_kd_uses_deaths():
 def test_mode_stat_rows_empty():
     assert pubg._mode_stat_rows({}) == []
     assert pubg._mode_stat_rows({"solo": {"roundsPlayed": 0}}) == []
+
+
+def test_missing_deaths_is_distinct_from_zero():
+    stats = {"solo": {"roundsPlayed": 4, "wins": 1, "kills": 9}}
+    text = pubg._render_text("Tester", "steam", stats, "pid", [])
+    assert "死亡 —" in text and "K/D —" in text
+    stats["solo"]["deaths"] = 0
+    text = pubg._render_text("Tester", "steam", stats, "pid", [])
+    assert "死亡 0" in text and "K/D 9.00" in text
 
 
 def test_parse_match_success():
@@ -104,6 +116,20 @@ def test_parse_match_malformed():
     assert pubg._parse_match({"data": {}}, "id") is None
 
 
+def test_recent_matches_skip_unusable_records():
+    valid = {
+        "data": {"attributes": {}},
+        "included": [
+            {"type": "participant", "attributes": {}},
+            {"type": "participant", "attributes": {"stats": {"playerId": "pid", "winPlace": 1}}},
+        ],
+    }
+    unusable = {"data": {"attributes": None}}
+    text = pubg._render_text("Tester", "steam", {}, "pid", [unusable, valid])
+    assert "[1]" in text and "[2]" not in text and "排名 吃鸡" in text
+    assert "最近对局" not in pubg._render_text("Tester", "steam", {}, "pid", [unusable])
+
+
 def test_render_text_includes_kd_and_deaths():
     gm = {
         "squad": {
@@ -143,3 +169,56 @@ def test_font_cache_reuses_instance():
     a = pubg._load_font(18)
     b = pubg._load_font(18)
     assert a is b
+
+
+def test_tool_uses_configured_platform_unless_overridden():
+    plugin = pubg.PubgPlugin(None, {"default_platform": "psn", "api_key": "test"})
+    info = pubg.PlayerInfo("pid", "Tester", "psn", None)
+    with patch.object(plugin, "_fetch_all", new=AsyncMock(return_value=(info, {}, []))) as fetch:
+        asyncio.run(plugin.pubg_query_tool(None, "Tester"))
+        fetch.assert_awaited_with("Tester", "psn", "test")
+        asyncio.run(plugin.pubg_query_tool(None, "Tester", "steam"))
+        fetch.assert_awaited_with("Tester", "steam", "test")
+
+
+def test_cancel_lookup_finishes_lifetime_request_before_closing_session():
+    async def run():
+        started = asyncio.Event()
+        finished = asyncio.Event()
+        player = {
+            "id": "pid",
+            "attributes": {"name": "Tester"},
+            "relationships": {"matches": {"data": [{"id": "mid"}]}},
+        }
+
+        async def request(session, url, **kwargs):
+            if url.endswith("/players"):
+                return {"data": [player]}
+            if url.endswith("/lifetime"):
+                started.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    finished.set()
+            await asyncio.Future()
+
+        plugin = pubg.PubgPlugin(None)
+        session = MagicMock()
+
+        async def check_session_exit(*args):
+            assert finished.is_set()
+
+        session.__aexit__.side_effect = check_session_exit
+        with patch.object(pubg.aiohttp, "ClientSession", return_value=session), \
+             patch.object(pubg, "_api_request", request):
+            lookup = asyncio.create_task(plugin._fetch_all("Tester", "steam", "test"))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            lookup.cancel()
+            try:
+                await lookup
+            except asyncio.CancelledError:
+                pass
+            assert lookup.cancelled()
+            session.__aexit__.assert_awaited_once()
+
+    asyncio.run(run())

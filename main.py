@@ -96,12 +96,16 @@ class ModeStatRow:
     top10: int
     kills: int
     assists: int
-    deaths: int
-    kd: float
+    deaths: Optional[int]
+    kd: Optional[float]
     win_pct: float
     top10_pct: float
     avg_dmg: float
     avg_min: float
+
+    @property
+    def kd_text(self) -> str:
+        return f"{self.kd:.2f}" if self.kd is not None else "—"
 
 
 def _calc_kd(kills: int | float, deaths: int | float) -> float:
@@ -130,7 +134,7 @@ def _mode_stat_rows(gm_stats: dict) -> list[ModeStatRow]:
         top10 = s.get("top10s", 0) or 0
         kills = s.get("kills", 0) or 0
         assists = s.get("assists", 0) or 0
-        deaths = s.get("deaths", 0) or 0
+        deaths = s.get("deaths")
         damage = float(s.get("damageDealt", 0.0) or 0.0)
         survived = float(s.get("timeSurvived", 0.0) or 0.0)
         rows.append(
@@ -142,7 +146,7 @@ def _mode_stat_rows(gm_stats: dict) -> list[ModeStatRow]:
                 kills=kills,
                 assists=assists,
                 deaths=deaths,
-                kd=_calc_kd(kills, deaths),
+                kd=_calc_kd(kills, deaths) if deaths is not None else None,
                 win_pct=wins / rounds * 100,
                 top10_pct=top10 / rounds * 100,
                 avg_dmg=damage / rounds,
@@ -251,11 +255,7 @@ def _render_image(
 ) -> str:
     mode_rows = _mode_stat_rows(gm_stats)
 
-    match_rows = []
-    for match_data in match_results:
-        entry = _parse_match(match_data, player_id)
-        if entry:
-            match_rows.append(entry)
+    match_rows = _match_rows(match_results, player_id)
 
     is_banned = ban_type is not None
     ban_label = _BAN_STATUS_LABELS.get(ban_type, ban_type) if ban_type else None
@@ -325,7 +325,7 @@ def _render_image(
             draw.text((col1_x, row2_y), f"场次  {row.rounds}", font=f_norm, fill=GRAY)
             draw.text((col2_x, row2_y), f"胜场  {row.wins} ({row.win_pct:.1f}%)", font=f_norm, fill=WIN_CLR)
             draw.text((col3_x, row2_y), f"Top10  {row.top10} ({row.top10_pct:.1f}%)", font=f_norm, fill=GRAY)
-            draw.text((col1_x, row3_y), f"K/D  {row.kd:.2f}", font=f_norm, fill=ACCENT)
+            draw.text((col1_x, row3_y), f"K/D  {row.kd_text}", font=f_norm, fill=ACCENT)
             draw.text((col2_x, row3_y), f"场均伤害  {row.avg_dmg:.0f}", font=f_norm, fill=WHITE)
             draw.text((col3_x, row3_y), f"场均存活  {row.avg_min:.1f}min", font=f_norm, fill=GRAY)
 
@@ -403,20 +403,19 @@ def _render_text(
         lines += ["  暂无战绩数据", ""]
     else:
         for row in mode_rows:
+            deaths = row.deaths if row.deaths is not None else "—"
             lines += [
                 f"▌{row.label}",
                 f"  场次 {row.rounds}  胜场 {row.wins}({row.win_pct:.1f}%)  Top10 {row.top10}({row.top10_pct:.1f}%)",
-                f"  击杀 {row.kills}  死亡 {row.deaths}  助攻 {row.assists}  K/D {row.kd:.2f}",
+                f"  击杀 {row.kills}  死亡 {deaths}  助攻 {row.assists}  K/D {row.kd_text}",
                 f"  场均伤害 {row.avg_dmg:.0f}  场均存活 {row.avg_min:.1f}min",
                 "",
             ]
 
-    if match_results:
+    match_rows = _match_rows(match_results, player_id)
+    if match_rows:
         lines += ["◆ 最近对局", bar]
-        for idx, md in enumerate(match_results, 1):
-            e = _parse_match(md, player_id)
-            if not e:
-                continue
+        for idx, e in enumerate(match_rows, 1):
             tag = "吃鸡" if e["place"] == 1 else f"#{e['place']}"
             lines += [
                 f"[{idx}] {e['date']}  {e['mode']}  {e['map']}",
@@ -428,30 +427,42 @@ def _render_text(
     return "\n".join(lines).rstrip()
 
 
+def _match_rows(match_results: list, player_id: str) -> list[dict]:
+    rows = []
+    for match_data in match_results:
+        entry = _parse_match(match_data, player_id)
+        if entry is not None:
+            rows.append(entry)
+    return rows
+
+
 def _parse_match(match_data: dict, player_id: str) -> Optional[dict]:
     try:
         attrs = match_data["data"]["attributes"]
+        if not isinstance(attrs, dict):
+            return None
         map_name   = _MAP_NAMES.get(attrs.get("mapName", ""), attrs.get("mapName", ""))
         mode_label = _MODE_LABELS.get(attrs.get("gameMode", ""), attrs.get("gameMode", ""))
-        date_str   = _fmt_date(attrs.get("createdAt", ""))
+        date_str   = _fmt_date(attrs.get("createdAt") or "")
 
         for item in match_data.get("included", []):
-            if item.get("type") != "participant":
+            if not isinstance(item, dict) or item.get("type") != "participant":
                 continue
-            stats = item["attributes"]["stats"]
-            if stats.get("playerId") != player_id:
+            participant = item.get("attributes")
+            stats = participant.get("stats") if isinstance(participant, dict) else None
+            if not isinstance(stats, dict) or stats.get("playerId") != player_id:
                 continue
             return {
                 "date": date_str, "mode": mode_label, "map": map_name,
                 "place":     stats.get("winPlace", 0),
                 "kills":     stats.get("kills", 0),
                 "assists":   stats.get("assists", 0),
-                "damage":    stats.get("damageDealt", 0.0),
+                "damage":    float(stats.get("damageDealt") or 0.0),
                 "headshots": stats.get("headshotKills", 0),
-                "longest":   stats.get("longestKill", 0.0),
-                "survive":   stats.get("timeSurvived", 0.0) / 60,
+                "longest":   float(stats.get("longestKill") or 0.0),
+                "survive":   float(stats.get("timeSurvived") or 0.0) / 60,
             }
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, ValueError):
         pass
     return None
 
@@ -559,7 +570,7 @@ class PubgPlugin(Star):
         if len(parts) < 2:
             yield event.plain_result(
                 "用法: /pubg <玩家名> [平台]\n"
-                "平台可选: steam(默认) | psn | xbox | kakao\n"
+                f"平台可选: steam | psn | xbox | kakao（默认 {self._get_platform()}）\n"
                 "示例: /pubg shroud steam"
             )
             return
@@ -631,19 +642,18 @@ class PubgPlugin(Star):
         self,
         event: AstrMessageEvent,
         player_name: str,
-        platform: str = "steam",
+        platform: str = "",
     ) -> str:
         """查询 PUBG 玩家终身战绩和最近对局数据，包括 K/D、胜率、场均伤害、场均存活时间。
 
         Args:
             player_name(string): PUBG 玩家游戏昵称，必须精确匹配
-            platform(string): 游戏平台，可选: steam(默认), psn, xbox, kakao
+            platform(string): 游戏平台，可选 steam、psn、xbox、kakao，省略时使用插件配置
         """
         if not isinstance(player_name, str) or not player_name.strip():
             return "请提供玩家昵称。用法: /pubg <玩家名> [平台]"
-        if not isinstance(platform, str):
-            platform = "steam"
-        platform = platform.lower().strip() or "steam"
+        platform = platform.strip().lower() if isinstance(platform, str) else ""
+        platform = platform or self._get_platform()
         if platform not in VALID_PLATFORMS:
             return f"不支持的平台: {platform}。可选: {', '.join(sorted(VALID_PLATFORMS))}"
 
@@ -708,7 +718,12 @@ class PubgPlugin(Star):
                     retry=API_MAX_RETRY,
                 )
             )
-            match_results_raw = await self._fetch_matches(session, platform, match_ids)
+            try:
+                match_results_raw = await self._fetch_matches(session, platform, match_ids)
+            except BaseException:
+                lifetime_task.cancel()
+                await asyncio.gather(lifetime_task, return_exceptions=True)
+                raise
             try:
                 lifetime_data = await lifetime_task
             except PubgApiError:
